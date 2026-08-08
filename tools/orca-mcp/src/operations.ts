@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isIP } from "node:net";
 import net from "node:net";
 import WebSocket from "ws";
+import { liveCall, liveState } from "./live.js";
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const configRoot = join(homedir(), ".config", "OrcaSlicer");
@@ -53,6 +54,15 @@ export interface JobRecord {
   estimatedTime?: string;
   filament?: string;
   warnings: string[];
+  source?: {
+    kind: "live_session";
+    sessionId: string;
+    stateToken: string;
+    plateIndex: number;
+    projectName: string;
+    gcodePath: string;
+    gcodeSha256: string;
+  };
 }
 
 export function validateJobAuthorization(record: JobRecord, jobId: string, expectedSha256: string, nowMs: number): void {
@@ -76,6 +86,29 @@ export function validateJobState(record: JobRecord, current: {
   if ((record.printerIdentity.mac && current.printerIdentity.mac !== record.printerIdentity.mac) ||
       (record.printerIdentity.model && current.printerIdentity.model !== record.printerIdentity.model))
     throw new Error("Printer identity changed after print preparation");
+}
+
+function activeGcodePath(state: Record<string, unknown>): string {
+  const activePlateIndex = Number(state.activePlateIndex);
+  const plates = Array.isArray(state.plates) ? state.plates : [];
+  const plate = plates.find(value => value && typeof value === "object" &&
+    Number((value as Record<string, unknown>).index) === activePlateIndex) as Record<string, unknown> | undefined;
+  const slice = plate?.slice;
+  return slice && typeof slice === "object" && typeof (slice as Record<string, unknown>).gcodePath === "string"
+    ? String((slice as Record<string, unknown>).gcodePath) : "";
+}
+
+export function validateLiveJobSource(record: JobRecord, current: Record<string, unknown>,
+                                      currentGcodeSha256: string): void {
+  const source = record.source;
+  if (source?.kind !== "live_session")
+    throw new Error("The prepared job is not bound to a live OrcaSlicer session");
+  if (current.sessionId !== source.sessionId || current.stateToken !== source.stateToken)
+    throw new Error("The live OrcaSlicer plate changed after print preparation");
+  if (current.activePlateIndex !== source.plateIndex || activeGcodePath(current) !== source.gcodePath)
+    throw new Error("The active OrcaSlicer plate or sliced artifact changed after print preparation");
+  if (currentGcodeSha256 !== source.gcodeSha256)
+    throw new Error("The live OrcaSlicer G-code changed after print preparation");
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -449,6 +482,50 @@ export async function sliceModel(inputPath: string, machineProfile: string, proc
   return { ...result, input, outputDir, command: { executable: binary, args }, outputs: summaries };
 }
 
+async function enrichLiveState(state: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const objects = Array.isArray(state.objects) ? state.objects : [];
+  await Promise.all(objects.map(async value => {
+    if (!value || typeof value !== "object")
+      return;
+    const object = value as Record<string, unknown>;
+    const sourcePath = typeof object.sourcePath === "string" ? object.sourcePath : "";
+    if (!sourcePath)
+      return;
+    try {
+      object.sourceSha256 = await sha256(sourcePath);
+    } catch {
+      object.sourceSha256 = null;
+    }
+  }));
+  return state;
+}
+
+export async function livePlateState(): Promise<Record<string, unknown>> {
+  return await enrichLiveState(await liveState());
+}
+
+export async function clearLivePlate(expectedStateToken: string,
+                                     scope: "current_plate" | "all_models" = "current_plate"): Promise<Record<string, unknown>> {
+  return await liveCall("clear", { expectedStateToken, scope }) as Record<string, unknown>;
+}
+
+export async function importLiveStl(stlPath: string, expectedStateToken: string): Promise<Record<string, unknown>> {
+  const path = resolve(stlPath);
+  if (!isAbsolute(stlPath) || extname(path).toLowerCase() !== ".stl" || !(await exists(path)))
+    throw new Error("stlPath must be an existing absolute .stl file");
+  const sourceSha256 = await sha256(path);
+  const result = await liveCall("import_stl", { expectedStateToken, path }) as Record<string, unknown>;
+  return { ...result, sourceSha256 };
+}
+
+export async function saveLiveProject(projectPath: string, expectedStateToken: string,
+                                      overwrite = false): Promise<Record<string, unknown>> {
+  const path = resolve(projectPath);
+  if (!isAbsolute(projectPath) || extname(path).toLowerCase() !== ".3mf")
+    throw new Error("projectPath must be an absolute .3mf file");
+  return await liveCall("save_project", { expectedStateToken, path, overwrite }) as Record<string, unknown>;
+}
+
 export async function uploadGcode(gcodePath: string, profile?: string, remoteName?: string): Promise<Record<string, unknown>> {
   const printer = await resolvePrinter(profile);
   const summary = await summarizeGcode(gcodePath);
@@ -481,7 +558,8 @@ export async function uploadGcode(gcodePath: string, profile?: string, remoteNam
   }
 }
 
-export async function preparePrint(gcodePath: string, profile?: string, uploadName?: string): Promise<Record<string, unknown>> {
+export async function preparePrint(gcodePath: string, profile?: string, uploadName?: string,
+                                   source?: JobRecord["source"]): Promise<Record<string, unknown>> {
   const printer = await resolvePrinter(profile);
   const summary = await summarizeGcode(gcodePath);
   const details = await stat(summary.path);
@@ -513,11 +591,61 @@ export async function preparePrint(gcodePath: string, profile?: string, uploadNa
     printerIdentity,
     estimatedTime: summary.estimatedTime,
     filament: summary.filament,
-    warnings: summary.warnings
+    warnings: summary.warnings,
+    source
   };
   await mkdir(jobsRoot, { recursive: true });
   await writeFile(join(jobsRoot, `${id}.json`), JSON.stringify(record, null, 2), { mode: 0o600, flag: "wx" });
   return { ...record, confirmationPhrase: `START ${id}` };
+}
+
+export async function prepareLivePrint(expectedStateToken: string, profile?: string,
+                                       remoteName?: string): Promise<Record<string, unknown>> {
+  const artifact = await liveCall("print_artifact", { expectedStateToken }) as Record<string, unknown>;
+  const state = artifact.state as Record<string, unknown>;
+  const gcodePath = String(artifact.gcodePath || "");
+  const sessionId = String(state.sessionId || "");
+  const stateToken = String(state.stateToken || "");
+  const plateIndex = Number(artifact.plateIndex);
+  if (!gcodePath || sessionId.length === 0 || stateToken !== expectedStateToken || !Number.isInteger(plateIndex))
+    throw new Error("OrcaSlicer returned an invalid live print artifact");
+
+  const snapshotDirectory = join(automationRoot, "live-print-snapshots", `${Date.now()}-${randomUUID()}`);
+  await mkdir(snapshotDirectory, { recursive: true });
+  const snapshotPath = join(snapshotDirectory, basename(gcodePath));
+  try {
+    const before = await stat(gcodePath);
+    const sourceSha256 = await sha256(gcodePath);
+    await copyFile(gcodePath, snapshotPath, fsConstants.COPYFILE_EXCL);
+    const [after, snapshotSha256, current] = await Promise.all([
+      stat(gcodePath), sha256(snapshotPath), liveState()
+    ]);
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || sourceSha256 !== snapshotSha256)
+      throw new Error("The live G-code changed while it was being snapshotted; slice and prepare again");
+    if (current.sessionId !== sessionId || current.stateToken !== stateToken ||
+        current.activePlateIndex !== plateIndex || activeGcodePath(current) !== gcodePath)
+      throw new Error("The live OrcaSlicer plate changed while preparing the print");
+    await chmod(snapshotPath, 0o400).catch(() => undefined);
+
+    const upload = await uploadGcode(snapshotPath, profile, remoteName);
+    const uploadName = String(upload.uploadName);
+    const source: NonNullable<JobRecord["source"]> = {
+      kind: "live_session",
+      sessionId,
+      stateToken,
+      plateIndex,
+      projectName: String(artifact.projectName || ""),
+      gcodePath,
+      gcodeSha256: sourceSha256
+    };
+    const prepared = await preparePrint(snapshotPath, profile, uploadName, source);
+    const record = prepared as Record<string, unknown>;
+    record.confirmationPhrase = `START LIVE ${record.id}`;
+    return { live: source, upload, prepared: record };
+  } catch (error) {
+    await rm(snapshotDirectory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function sendStartPrint(host: string, uploadName: string): Promise<void> {
@@ -546,9 +674,11 @@ async function sendStartPrint(host: string, uploadName: string): Promise<void> {
   });
 }
 
-export async function startPrint(jobId: string, expectedSha256: string, confirmation: string): Promise<Record<string, unknown>> {
-  if (!/^[0-9a-f-]{36}$/i.test(jobId) || confirmation !== `START ${jobId}`)
-    throw new Error("A fresh exact START <job-id> confirmation is required");
+async function startPreparedPrint(jobId: string, expectedSha256: string, confirmation: string,
+                                  requireLiveSource: boolean): Promise<Record<string, unknown>> {
+  const expectedConfirmation = requireLiveSource ? `START LIVE ${jobId}` : `START ${jobId}`;
+  if (!/^[0-9a-f-]{36}$/i.test(jobId) || confirmation !== expectedConfirmation)
+    throw new Error(`A fresh exact ${requireLiveSource ? "START LIVE" : "START"} <job-id> confirmation is required`);
   const jobPath = join(jobsRoot, `${jobId}.json`);
   const claimedPath = join(jobsRoot, `${jobId}.starting`);
   await rename(jobPath, claimedPath);
@@ -556,6 +686,12 @@ export async function startPrint(jobId: string, expectedSha256: string, confirma
   try {
     record = JSON.parse(await readFile(claimedPath, "utf8")) as JobRecord;
     validateJobAuthorization(record, jobId, expectedSha256, Date.now());
+    if (requireLiveSource) {
+      if (record.source?.kind !== "live_session" || !record.source.gcodePath)
+        throw new Error("The prepared job is not bound to a complete live OrcaSlicer artifact");
+      const current = await liveState();
+      validateLiveJobSource(record, current, await sha256(record.source.gcodePath));
+    }
     const details = await stat(record.gcodePath);
     const currentSha256 = await sha256(record.gcodePath);
     const printer = await resolvePrinter(record.printerProfile);
@@ -576,4 +712,13 @@ export async function startPrint(jobId: string, expectedSha256: string, confirma
   } finally {
     await unlink(claimedPath).catch(() => undefined);
   }
+}
+
+export async function startPrint(jobId: string, expectedSha256: string, confirmation: string): Promise<Record<string, unknown>> {
+  return await startPreparedPrint(jobId, expectedSha256, confirmation, false);
+}
+
+export async function startLivePrint(jobId: string, expectedSha256: string,
+                                     confirmation: string): Promise<Record<string, unknown>> {
+  return await startPreparedPrint(jobId, expectedSha256, confirmation, true);
 }

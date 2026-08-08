@@ -3,6 +3,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
+#include "LiveAutomation.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "slic3r/GUI/UserManager.hpp"
@@ -1079,6 +1080,8 @@ void GUI_App::post_init()
            }
         }
     }
+    if (m_live_automation)
+        m_live_automation->start(plater());
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
 #ifdef _WIN32
@@ -1107,6 +1110,7 @@ GUI_App::GUI_App()
 	, m_removable_drive_manager(std::make_unique<RemovableDriveManager>())
     , m_downloader(std::make_unique<Downloader>())
 	, m_other_instance_message_handler(std::make_unique<OtherInstanceMessageHandler>())
+    , m_live_automation(std::make_unique<LiveAutomation>())
 {
 	//app config initializes early becasuse it is used in instance checking in OrcaSlicer.cpp
     this->init_app_config();
@@ -1122,6 +1126,9 @@ GUI_App::GUI_App()
 void GUI_App::shutdown()
 {
     BOOST_LOG_TRIVIAL(info) << "GUI_App::shutdown enter";
+
+    if (m_live_automation)
+        m_live_automation->stop();
 
 	if (m_removable_drive_manager) {
 		removable_drive_manager()->shutdown();
@@ -2696,6 +2703,8 @@ bool GUI_App::OnInit()
 
 int GUI_App::OnExit()
 {
+    if (m_live_automation)
+        m_live_automation->stop();
     stop_http_server();
     stop_sync_user_preset();
 
