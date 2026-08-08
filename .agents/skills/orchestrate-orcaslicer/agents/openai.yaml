@@ -1,0 +1,14 @@
+interface:
+  display_name: "Orchestrate OrcaSlicer"
+  short_description: "Build, validate, slice, and operate OrcaSlicer"
+  default_prompt: "Use $orchestrate-orcaslicer to inspect and safely operate this OrcaSlicer checkout."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "orcaslicer"
+      description: "Project-local OrcaSlicer build and printer controls"
+      transport: "stdio"
+
+policy:
+  allow_implicit_invocation: true

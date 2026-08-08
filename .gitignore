@@ -46,6 +46,12 @@ test.js
 internal_docs/
 *.flatpak
 /flatpak-repo/
+/.local/
+tools/orca-mcp/node_modules/
+tools/orca-mcp/dist/
+/resources/camera/linux-x64/go2rtc
 # Python bytecode
 __pycache__/
 *.pyc
+# Orca CLI transient output
+/result.json

@@ -584,6 +584,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/ColorSpaceConvert.hpp
     Utils/CrealityPrint.cpp
     Utils/CrealityPrint.hpp
+    Utils/CrealityWebRTC.cpp
+    Utils/CrealityWebRTC.hpp
     Utils/CrealityPrintAgent.cpp
     Utils/CrealityPrintAgent.hpp
     Utils/CrealityHostDiscovery.cpp
