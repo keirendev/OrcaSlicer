@@ -145,8 +145,9 @@ public:
     {
         // The current Linux WebKitGTK package exposes MediaSource but not
         // RTCPeerConnection. The Creality transport therefore runs in a
-        // pinned loopback helper and WebKit only renders its bounded-rate
-        // loopback MJPEG stream.
+        // pinned loopback helper and passes the printer's native H.264 stream
+        // to WebKit as fragmented MP4 over a loopback WebSocket. This avoids
+        // both transcoding and the frame-rate cap of an MJPEG polling bridge.
         if (auto* web_view = static_cast<WebKitWebView*>(browser()->GetNativeBackend())) {
             if (WebKitSettings* settings = webkit_web_view_get_settings(web_view)) {
                 webkit_settings_set_enable_media(settings, TRUE);
@@ -243,9 +244,7 @@ private:
             return {};
 
         const boost::filesystem::path helper_path = path_from_utf8(resources_dir()) / "camera" / "linux-x64" / "go2rtc";
-        const boost::filesystem::path static_path = path_from_utf8(resources_dir()) / "web" / "k1_camera_proxy";
-        if (!boost::filesystem::is_regular_file(helper_path) ||
-            !boost::filesystem::is_regular_file(static_path / "camera.html")) {
+        if (!boost::filesystem::is_regular_file(helper_path)) {
             error = "The packaged K1 camera helper is missing";
             return {};
         }
@@ -275,11 +274,10 @@ private:
             return {};
         }
         output << "app:\n"
-               << "  modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg]\n"
+               << "  modules: [api, ws, rtsp, webrtc, mp4]\n"
                << "api:\n"
                << "  listen: \"127.0.0.1:" << m_helper_port << "\"\n"
-               << "  static_dir: " << yaml_quote(static_path.string()) << "\n"
-               << "  allow_paths: [\"/\", \"/api/frame.jpeg\"]\n"
+               << "  allow_paths: [\"/\", \"/api/ws\"]\n"
                << "rtsp:\n"
                << "  listen: \"127.0.0.1:" << m_helper_rtsp_port << "\"\n"
                << "webrtc:\n"
@@ -288,11 +286,8 @@ private:
                << "  ice_servers: []\n"
                << "streams:\n"
                << "  k1_source: " << yaml_quote("webrtc:" + signaling_url + "#format=creality") << "\n"
-               << "  k1_orca: \"ffmpeg:k1_source#video=mjpeg#width=960#raw=-r 5\"\n"
                << "preload:\n"
-               << "  k1_orca: \"video=mjpeg\"\n"
-               << "exec:\n"
-               << "  allow_paths: [ffmpeg]\n"
+               << "  k1_source: \"video=h264\"\n"
                << "log:\n"
                << "  level: warn\n"
                << "  format: text\n";
@@ -319,7 +314,8 @@ private:
 
     std::string camera_url() const
     {
-        return "http://127.0.0.1:" + std::to_string(m_helper_port) + "/camera.html";
+        return "http://127.0.0.1:" + std::to_string(m_helper_port) +
+               "/stream.html?src=k1_source&mode=mse&background=true";
     }
 
     void stop_helper()
