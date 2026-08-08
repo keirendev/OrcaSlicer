@@ -47,13 +47,13 @@ source_tree_sha256=$(
 cat >"${pkgroot}/usr/share/doc/orca-slicer-k1-camera/build-metadata.json" <<EOF
 {
   "package": "orca-slicer-k1-camera",
-  "version": "2.4.2.k1webrtc2-1",
+  "version": "2.4.2.k1webrtc3-1",
   "upstream_base": "8500fcdccaa10b5099ac20d252af3a7c560046f1",
   "source_commit": "${source_commit}",
   "source_branch": "${source_branch}",
   "tracked_diff_sha256": "${patch_sha256}",
   "source_tree_sha256": "${source_tree_sha256}",
-  "camera_transport": "native H.264 over MSE",
+  "camera_transport": "native H.264 over retimed low-latency MSE",
   "camera_helper": "go2rtc 1.9.14",
   "camera_helper_sha256": "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
 }
@@ -64,8 +64,8 @@ installed_size=$(du -sb "${pkgroot}" | awk '{print $1}')
 cat >"${pkgroot}/.PKGINFO" <<EOF
 pkgname = orca-slicer-k1-camera
 pkgbase = orca-slicer-k1-camera
-pkgver = 2.4.2.k1webrtc2-1
-pkgdesc = OrcaSlicer 2.4.2 with native-quality Creality K1 LAN camera support
+pkgver = 2.4.2.k1webrtc3-1
+pkgdesc = OrcaSlicer 2.4.2 with realtime native-quality Creality K1 LAN camera support
 url = https://github.com/keirendev/OrcaSlicer
 builddate = ${build_date}
 packager = OrcaSlicer local Codex build
@@ -91,7 +91,7 @@ provides = orca-slicer=2.4.2
 conflict = orca-slicer
 EOF
 
-package="${ORCA_PACKAGE_ROOT}/orca-slicer-k1-camera-2.4.2.k1webrtc2-1-x86_64.pkg.tar.zst"
+package="${ORCA_PACKAGE_ROOT}/orca-slicer-k1-camera-2.4.2.k1webrtc3-1-x86_64.pkg.tar.zst"
 (
     cd "${pkgroot}"
     fakeroot -- bash -c '

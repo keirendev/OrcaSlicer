@@ -40,6 +40,10 @@ PrinterWebViewHandler::PrinterWebViewHandler(PrinterWebView& owner)
 
 PrinterWebViewHandler::~PrinterWebViewHandler() = default;
 
+void PrinterWebViewHandler::install_user_scripts()
+{
+}
+
 void PrinterWebViewHandler::on_loaded(wxWebViewEvent &evt)
 {
 }
@@ -158,6 +162,19 @@ public:
         }
     }
 
+    void install_user_scripts() override
+    {
+        boost::nowide::ifstream script_file(resources_dir() + "/web/k1_webui_bootstrap.js");
+        if (!script_file) {
+            BOOST_LOG_TRIVIAL(error) << "Creality WebUI bootstrap resource is missing";
+            return;
+        }
+        std::ostringstream script;
+        script << script_file.rdbuf();
+        if (!browser()->AddUserScript(wxString::FromUTF8(script.str()), wxWEBVIEW_INJECT_AT_DOCUMENT_START))
+            BOOST_LOG_TRIVIAL(error) << "Creality WebUI bootstrap registration failed";
+    }
+
     ~CrealityPrinterWebViewHandler() override
     {
         stop_helper();
@@ -244,7 +261,11 @@ private:
             return {};
 
         const boost::filesystem::path helper_path = path_from_utf8(resources_dir()) / "camera" / "linux-x64" / "go2rtc";
-        if (!boost::filesystem::is_regular_file(helper_path)) {
+        const boost::filesystem::path static_path = path_from_utf8(resources_dir()) / "web" / "k1_camera_proxy";
+        if (!boost::filesystem::is_regular_file(helper_path) ||
+            !boost::filesystem::is_regular_file(static_path / "camera.html") ||
+            !boost::filesystem::is_regular_file(static_path / "camera.js") ||
+            !boost::filesystem::is_regular_file(static_path / "fmp4_retime.js")) {
             error = "The packaged K1 camera helper is missing";
             return {};
         }
@@ -277,6 +298,7 @@ private:
                << "  modules: [api, ws, rtsp, webrtc, mp4]\n"
                << "api:\n"
                << "  listen: \"127.0.0.1:" << m_helper_port << "\"\n"
+               << "  static_dir: " << yaml_quote(static_path.string()) << "\n"
                << "  allow_paths: [\"/\", \"/api/ws\"]\n"
                << "rtsp:\n"
                << "  listen: \"127.0.0.1:" << m_helper_rtsp_port << "\"\n"
@@ -315,7 +337,7 @@ private:
     std::string camera_url() const
     {
         return "http://127.0.0.1:" + std::to_string(m_helper_port) +
-               "/stream.html?src=k1_source&mode=mse&background=true";
+               "/camera.html";
     }
 
     void stop_helper()

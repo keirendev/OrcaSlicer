@@ -17,6 +17,7 @@ public:
     explicit PrinterWebViewHandler(PrinterWebView& owner);
     virtual ~PrinterWebViewHandler();
 
+    virtual void install_user_scripts();
     virtual void on_loaded(wxWebViewEvent &evt);
     virtual void on_script_message(wxWebViewEvent &evt);
 
