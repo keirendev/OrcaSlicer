@@ -14,7 +14,13 @@ find_appimage() {
     fi
 
     local candidate
-    candidate=$(find "${ORCA_REPO_ROOT}" -path '*/node_modules' -prune -o -type f -iname '*OrcaSlicer*.AppImage' -print 2>/dev/null | sort | tail -n 1)
+    candidate=$(
+        find "${ORCA_REPO_ROOT}" -path '*/node_modules' -prune -o \
+            -type f -iname '*OrcaSlicer*.AppImage' -printf '%T@ %p\n' 2>/dev/null |
+            sort -nr |
+            head -n 1 |
+            cut -d' ' -f2-
+    )
     if [[ -z "${candidate}" ]]; then
         echo "No OrcaSlicer AppImage was found. Run scripts/codex/build-local-appimage.sh first." >&2
         return 1
