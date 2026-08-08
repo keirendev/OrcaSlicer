@@ -71,6 +71,7 @@ namespace GUI{
 
 class RemovableDriveManager;
 class OtherInstanceMessageHandler;
+class LiveAutomation;
 class MainFrame;
 class Sidebar;
 class ObjectSettings;
@@ -287,6 +288,7 @@ private:
     std::unique_ptr<ImGuiWrapper> m_imgui;
     std::unique_ptr<PrintHostJobQueue> m_printhost_job_queue;
 	std::unique_ptr <OtherInstanceMessageHandler> m_other_instance_message_handler;
+    std::unique_ptr<LiveAutomation> m_live_automation;
     std::unique_ptr <wxSingleInstanceChecker> m_single_instance_checker;
     std::string m_instance_hash_string;
 	size_t m_instance_hash_int;

@@ -26,3 +26,9 @@ Before `orca_start_print`:
 4. Let the server re-read and re-hash the file and re-probe the same printer.
 
 Never reuse a job record or confirmation after a failed or successful start.
+
+### Live-session print confirmation
+
+`orca_live_prepare_print` accepts only the active visible plate's valid sliced G-code. In addition to the checks above, its record is bound to the live application session ID, opaque state token, active plate index, project name, original G-code path, and original G-code SHA-256. `orca_live_start_print` re-inspects the application and re-hashes both the original live artifact and its managed snapshot immediately before the printer write. It refuses if any bound live state changed. Its confirmation phrase is `START LIVE <job-id>`.
+
+Preparing uploads the immutable managed G-code snapshot but cannot start it. Never call the live start tool without fresh user approval for the exact record, and never translate ordinary requests such as import, arrange, slice, save, or upload into permission to start hardware.
