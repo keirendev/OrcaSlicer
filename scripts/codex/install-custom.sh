@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 require_repo_root
 
-package=${1:-"${ORCA_PACKAGE_ROOT}/orca-slicer-k1-camera-2.4.2.k1webrtc2-1-x86_64.pkg.tar.zst"}
+package=${1:-"${ORCA_PACKAGE_ROOT}/orca-slicer-k1-camera-2.4.2.k1webrtc3-1-x86_64.pkg.tar.zst"}
 orca_config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/OrcaSlicer"
 rollback="${XDG_CACHE_HOME:-${HOME}/.cache}/paru/clone/orca-slicer-bin/orca-slicer-bin-2.4.2-1-x86_64.pkg.tar.zst"
 package=$(realpath -e -- "${package}" 2>/dev/null || true)

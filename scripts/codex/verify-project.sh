@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${repo_root}"
 node --check resources/web/k1_camera_webrtc.js
+node --check resources/web/k1_camera_proxy/camera.js
+node --check resources/web/k1_camera_proxy/fmp4_retime.js
+node --check resources/web/k1_webui_bootstrap.js
 "${repo_root}/scripts/codex/fetch-camera-helper.sh"
 test "$(sha256sum resources/camera/linux-x64/go2rtc | awk '{print $1}')" = "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
 npm test --prefix tools/orca-mcp

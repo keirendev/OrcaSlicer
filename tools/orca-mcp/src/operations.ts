@@ -382,7 +382,7 @@ export async function packageArch(): Promise<Record<string, unknown>> {
   if (!artifact)
     throw new Error("Packaging completed without a checksummed package artifact");
   return { artifactPath: resolve(artifact[2]), sha256: artifact[1], packageName: "orca-slicer-k1-camera",
-    version: "2.4.2.k1webrtc2-1", warnings: command.stderr ? [command.stderr] : [], command };
+    version: "2.4.2.k1webrtc3-1", warnings: command.stderr ? [command.stderr] : [], command };
 }
 
 export async function installCustom(packagePath?: string): Promise<Record<string, unknown>> {

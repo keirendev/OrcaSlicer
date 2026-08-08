@@ -4,7 +4,7 @@
 
 - Build from commit `8500fcdccaa10b5099ac20d252af3a7c560046f1` plus the reviewed local patch.
 - Test the AppImage with a copied `--datadir` before packaging.
-- Accept only `orca-slicer-k1-camera-2.4.2.k1webrtc2-1-x86_64.pkg.tar.zst` from `.local/orca-packages`.
+- Accept only `orca-slicer-k1-camera-2.4.2.k1webrtc3-1-x86_64.pkg.tar.zst` from `.local/orca-packages`.
 - Preserve `${XDG_CONFIG_HOME:-$HOME/.config}/OrcaSlicer` and verify the cached `orca-slicer-bin-2.4.2-1` package checksum before installation.
 - Verify the package, desktop launcher, Device view, camera, and a normal slice after installation. Roll back on failure.
 

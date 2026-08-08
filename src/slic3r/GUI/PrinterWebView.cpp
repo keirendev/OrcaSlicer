@@ -178,6 +178,8 @@ void PrinterWebView::load_url(wxString& url, wxString apikey)
     m_apikey = apikey;
     m_apikey_sent = false;
     m_handler = create_printer_webview_handler(*this);
+    if (m_handler != nullptr)
+        m_handler->install_user_scripts();
 
     if (this->IsShown()) {
         //ORCA: m_url_deferred will be cleared on load success
@@ -257,6 +259,8 @@ void PrinterWebView::SendAPIKey()
 #endif
 
     m_browser->AddUserScript(script);
+    if (m_handler != nullptr)
+        m_handler->install_user_scripts();
     m_browser->Reload();
 }
 
