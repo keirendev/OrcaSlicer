@@ -48,6 +48,16 @@ ctest --test-dir ./tests/fff_print
 - Profile/format changes need version migration handling
 - Dependencies built separately in `deps/build/`, then linked to main app
 
+## K1 Camera and Local Automation
+
+- Keep K1 camera signaling LAN-only. Never introduce cloud credentials, public STUN/TURN, firmware changes, or printer rooting.
+- Treat `resources/web/k1_camera_webrtc.js` and `CrealityWebRTC` as one protocol surface; run their focused checks after either changes.
+- Use `./scripts/codex/build-local-appimage.sh` for the reproducible Linux build and test an AppImage with an isolated data directory before installation.
+- Preserve the user's OrcaSlicer configuration and the cached official 2.4.2 package before replacing the system package.
+- Codex may inspect, build, slice, and upload autonomously. Starting a physical print always requires a fresh explicit confirmation for the exact job ID and SHA-256.
+- Do not add OrcaSlicer tooling to `~/.codex`, `~/.agents`, or a global marketplace. Repository integration belongs in `.agents/skills` and `.codex/config.toml`.
+- Never push, publish a release, modify printer firmware, or start a validation print unless the user separately requests it.
+
 ## Code review focus areas
 
 - Changes must not cause regressions in existing functionality, defaults, profiles, or project compatibility.

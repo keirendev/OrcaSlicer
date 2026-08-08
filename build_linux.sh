@@ -358,6 +358,34 @@ function run_in_docker() {
 
     ensure_docker_runner_image "${container_cli}" "${runner_image}"
 
+    # Rootless Podman maps an in-container UID 1000 to a subordinate host UID
+    # unless keep-id is requested. Run the already-provisioned builder image as
+    # the invoking user so mounted source and build artifacts stay writable and
+    # retain their host ownership.
+    if [[ "$(basename "${container_cli}")" == "podman" ]] ; then
+        printf '%q ' "${container_cli}" run --rm -i --userns=keep-id \
+            --user "${host_uid}:${host_gid}" \
+            -v "${SCRIPT_PATH}:${container_workspace}" \
+            -w "${container_workspace}" \
+            "${container_env[@]}" \
+            -e "HOME=/tmp/orca-home" \
+            "${runner_image}" \
+            bash -c 'mkdir -p "$HOME" && exec ./build_linux.sh "$@"' bash "${build_args[@]}"
+        echo
+        if [[ -z "${DRY_RUN}" ]] ; then
+            "${container_cli}" run --rm -i --userns=keep-id \
+                --user "${host_uid}:${host_gid}" \
+                -v "${SCRIPT_PATH}:${container_workspace}" \
+                -w "${container_workspace}" \
+                "${container_env[@]}" \
+                -e "HOME=/tmp/orca-home" \
+                "${runner_image}" \
+                bash -c 'mkdir -p "$HOME" && exec ./build_linux.sh "$@"' bash "${build_args[@]}"
+        fi
+        popd > /dev/null # ${SCRIPT_PATH}
+        exit 0
+    fi
+
     printf '%q ' "${container_cli}" run --rm -i \
         -v "${SCRIPT_PATH}:${container_workspace}" \
         -w "${container_workspace}" \

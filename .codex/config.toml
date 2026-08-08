@@ -1,0 +1,20 @@
+[mcp_servers.orcaslicer]
+command = "./tools/orca-mcp/bin/orca-mcp"
+args = []
+cwd = "."
+startup_timeout_sec = 20
+tool_timeout_sec = 14400
+required = false
+default_tools_approval_mode = "writes"
+
+[mcp_servers.orcaslicer.tools.orca_upload_gcode]
+approval_mode = "prompt"
+
+[mcp_servers.orcaslicer.tools.orca_install_custom]
+approval_mode = "prompt"
+
+[mcp_servers.orcaslicer.tools.orca_rollback]
+approval_mode = "prompt"
+
+[mcp_servers.orcaslicer.tools.orca_start_print]
+approval_mode = "prompt"

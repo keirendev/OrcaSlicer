@@ -5,14 +5,28 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
+#include "slic3r/Utils/CrealityWebRTC.hpp"
+#include "slic3r/Utils/Http.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 #include <nlohmann/json.hpp>
-#include <atomic>
+#include <boost/asio.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <thread>
+#include <boost/nowide/fstream.hpp>
+#include <mutex>
+#include <sstream>
 #include <wx/filedlg.h>
+#include <wx/filename.h>
+#include <wx/process.h>
 #include <wx/string.h>
+#include <wx/utils.h>
+#include <wx/weakref.h>
+
+#ifdef __linux__
+#include <webkit2/webkit2.h>
+#endif
 
 using json = nlohmann::json;
 
@@ -85,6 +99,276 @@ std::string filename_to_utf8(const boost::filesystem::path& path)
     return path.filename().string();
 #endif
 }
+
+#ifdef __linux__
+std::string yaml_quote(const std::string& value)
+{
+    std::string result = "\"";
+    result.reserve(value.size() + 2);
+    for (char c : value) {
+        if (c == '\\' || c == '"')
+            result.push_back('\\');
+        result.push_back(c);
+    }
+    result.push_back('"');
+    return result;
+}
+
+std::string shell_quote(const std::string& value)
+{
+    std::string result = "'";
+    for (char c : value) {
+        if (c == '\'')
+            result += "'\\''";
+        else
+            result.push_back(c);
+    }
+    result.push_back('\'');
+    return result;
+}
+
+unsigned short reserve_loopback_port()
+{
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor acceptor(
+        io, boost::asio::ip::tcp::endpoint(boost::asio::ip::address_v4::loopback(), 0));
+    const unsigned short port = acceptor.local_endpoint().port();
+    acceptor.close();
+    return port;
+}
+
+class CrealityPrinterWebViewHandler final : public PrinterWebViewHandler {
+public:
+    explicit CrealityPrinterWebViewHandler(PrinterWebView& owner)
+        : PrinterWebViewHandler(owner)
+        , m_browser(browser())
+    {
+        // The current Linux WebKitGTK package exposes MediaSource but not
+        // RTCPeerConnection. The Creality transport therefore runs in a
+        // pinned loopback helper and WebKit only renders its bounded-rate
+        // loopback MJPEG stream.
+        if (auto* web_view = static_cast<WebKitWebView*>(browser()->GetNativeBackend())) {
+            if (WebKitSettings* settings = webkit_web_view_get_settings(web_view)) {
+                webkit_settings_set_enable_media(settings, TRUE);
+                webkit_settings_set_enable_mediasource(settings, TRUE);
+                webkit_settings_set_media_playback_allows_inline(settings, TRUE);
+                webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
+            }
+        }
+    }
+
+    ~CrealityPrinterWebViewHandler() override
+    {
+        stop_helper();
+        if (m_camera_handler_registered) {
+            if (wxWebView* view = m_browser.get())
+                view->RemoveScriptMessageHandler("orcaCamera");
+        }
+    }
+
+    void on_loaded(wxWebViewEvent&) override
+    {
+        // Creality's bundled page may define its own `window.wx`. Keep camera
+        // IPC on a dedicated namespace and restore it after SendAPIKey() has
+        // reset WebKit user scripts/message handlers.
+        if (!m_camera_handler_registered) {
+            if (!browser()->AddScriptMessageHandler("orcaCamera")) {
+                BOOST_LOG_TRIVIAL(error) << "Creality camera message handler registration failed";
+            } else {
+                m_camera_handler_registered = true;
+            }
+        }
+
+        boost::nowide::ifstream script_file(resources_dir() + "/web/k1_camera_webrtc.js");
+        if (!script_file) {
+            BOOST_LOG_TRIVIAL(error) << "Creality camera bridge resource is missing";
+            return;
+        }
+        std::string helper_error;
+        const std::string helper_url = ensure_helper(helper_error);
+        json bridge = {{"ok", !helper_url.empty()}};
+        if (!helper_url.empty())
+            bridge["url"] = helper_url;
+        else
+            bridge["error"] = helper_error.empty() ? "Camera bridge failed" : helper_error;
+
+        std::ostringstream script;
+        script << "window.__orcaCrealityCameraBridge=" << bridge.dump() << ";\n";
+        script << script_file.rdbuf();
+        const bool injected = WebView::RunScript(browser(), wxString::FromUTF8(script.str()));
+        BOOST_LOG_TRIVIAL(info) << "Creality camera bridge injection " << (injected ? "succeeded" : "failed");
+    }
+
+    void on_script_message(wxWebViewEvent& evt) override
+    {
+        const wxScopedCharBuffer utf8 = evt.GetString().ToUTF8();
+        const json request = json::parse(utf8.data() == nullptr ? "" : utf8.data(), nullptr, false);
+        if (request.is_discarded() || !request.is_object()) {
+            BOOST_LOG_TRIVIAL(debug) << "Creality camera bridge ignored a non-JSON script message";
+            return;
+        }
+
+        const std::string method = json_string(request, "method");
+        BOOST_LOG_TRIVIAL(debug) << "Creality camera bridge received script method "
+                                 << (method.empty() ? "<empty>" : method);
+        if (method != "creality_camera_start")
+            return;
+
+        const std::string request_id = json_string(request, "id");
+        if (request_id.empty() || request_id.size() > 160) {
+            send_result(request_id, false, {}, "Invalid camera bridge request");
+            return;
+        }
+
+        std::string error;
+        const std::string url = ensure_helper(error);
+        BOOST_LOG_TRIVIAL(info) << "Creality camera helper request " << (url.empty() ? "failed" : "accepted");
+        send_result(request_id, !url.empty(), url, error);
+    }
+
+private:
+    std::string ensure_helper(std::string& error)
+    {
+        std::lock_guard<std::mutex> lock(m_helper_mutex);
+        if (m_helper_pid > 0 && wxProcess::Exists(m_helper_pid)) {
+            error.clear();
+            return camera_url();
+        }
+        stop_helper_locked();
+
+        DynamicPrintConfig* config = get_active_printer_config();
+        const std::string print_host = config == nullptr ? std::string() : config->opt_string("print_host");
+        const std::string signaling_url = CrealityWebRTC::signaling_url(print_host, error);
+        if (signaling_url.empty())
+            return {};
+
+        const boost::filesystem::path helper_path = path_from_utf8(resources_dir()) / "camera" / "linux-x64" / "go2rtc";
+        const boost::filesystem::path static_path = path_from_utf8(resources_dir()) / "web" / "k1_camera_proxy";
+        if (!boost::filesystem::is_regular_file(helper_path) ||
+            !boost::filesystem::is_regular_file(static_path / "camera.html")) {
+            error = "The packaged K1 camera helper is missing";
+            return {};
+        }
+
+        try {
+            m_helper_port = reserve_loopback_port();
+            do {
+                m_helper_rtsp_port = reserve_loopback_port();
+            } while (m_helper_rtsp_port == m_helper_port);
+        } catch (const std::exception&) {
+            error = "Unable to reserve loopback ports for the K1 camera";
+            return {};
+        }
+
+        const wxString temporary = wxFileName::CreateTempFileName("orca-k1-camera-");
+        const wxScopedCharBuffer temporary_utf8 = temporary.ToUTF8();
+        if (temporary_utf8.data() == nullptr) {
+            error = "Unable to create the K1 camera helper configuration";
+            return {};
+        }
+        m_helper_config = path_from_utf8(temporary_utf8.data());
+
+        boost::nowide::ofstream output(m_helper_config.string(), std::ios::trunc);
+        if (!output) {
+            error = "Unable to write the K1 camera helper configuration";
+            stop_helper_locked();
+            return {};
+        }
+        output << "app:\n"
+               << "  modules: [api, rtsp, webrtc, exec, ffmpeg, mjpeg]\n"
+               << "api:\n"
+               << "  listen: \"127.0.0.1:" << m_helper_port << "\"\n"
+               << "  static_dir: " << yaml_quote(static_path.string()) << "\n"
+               << "  allow_paths: [\"/\", \"/api/frame.jpeg\"]\n"
+               << "rtsp:\n"
+               << "  listen: \"127.0.0.1:" << m_helper_rtsp_port << "\"\n"
+               << "webrtc:\n"
+               << "  listen: \"\"\n"
+               << "  candidates: []\n"
+               << "  ice_servers: []\n"
+               << "streams:\n"
+               << "  k1_source: " << yaml_quote("webrtc:" + signaling_url + "#format=creality") << "\n"
+               << "  k1_orca: \"ffmpeg:k1_source#video=mjpeg#width=960#raw=-r 5\"\n"
+               << "preload:\n"
+               << "  k1_orca: \"video=mjpeg\"\n"
+               << "exec:\n"
+               << "  allow_paths: [ffmpeg]\n"
+               << "log:\n"
+               << "  level: warn\n"
+               << "  format: text\n";
+        output.close();
+        if (!output) {
+            error = "Unable to finish the K1 camera helper configuration";
+            stop_helper_locked();
+            return {};
+        }
+
+        const std::string command = shell_quote(helper_path.string()) + " -config " + shell_quote(m_helper_config.string());
+        m_helper_pid = wxExecute(wxString::FromUTF8(command), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE);
+        if (m_helper_pid <= 0) {
+            error = "Unable to launch the packaged K1 camera helper";
+            stop_helper_locked();
+            return {};
+        }
+
+        BOOST_LOG_TRIVIAL(info) << "Creality camera helper started pid=" << m_helper_pid
+                                << " loopback_port=" << m_helper_port;
+        error.clear();
+        return camera_url();
+    }
+
+    std::string camera_url() const
+    {
+        return "http://127.0.0.1:" + std::to_string(m_helper_port) + "/camera.html";
+    }
+
+    void stop_helper()
+    {
+        std::lock_guard<std::mutex> lock(m_helper_mutex);
+        stop_helper_locked();
+    }
+
+    void stop_helper_locked()
+    {
+        if (m_helper_pid > 0 && wxProcess::Exists(m_helper_pid)) {
+            wxKillError kill_error = wxKILL_OK;
+            wxKill(m_helper_pid, wxSIGTERM, &kill_error, wxKILL_CHILDREN);
+        }
+        m_helper_pid = 0;
+        m_helper_port = 0;
+        m_helper_rtsp_port = 0;
+        if (!m_helper_config.empty()) {
+            boost::system::error_code ec;
+            boost::filesystem::remove(m_helper_config, ec);
+            m_helper_config.clear();
+        }
+    }
+
+    void send_result(const std::string& request_id, bool ok, const std::string& url, const std::string& error)
+    {
+        json detail = {{"id", request_id}, {"ok", ok}};
+        if (ok)
+            detail["url"] = url;
+        else
+            detail["error"] = error.empty() ? "Camera bridge failed" : error;
+        const wxString script = wxString::FromUTF8(
+            "window.dispatchEvent(new CustomEvent('orca:creality-camera-ready',{detail:" + detail.dump() + "}));");
+        wxGetApp().CallAfter([browser = m_browser, script]() {
+            wxWebView* view = browser.get();
+            if (view != nullptr && !view->IsBeingDeleted())
+                WebView::RunScript(view, script);
+        });
+    }
+
+    wxWeakRef<wxWebView> m_browser;
+    std::mutex m_helper_mutex;
+    long m_helper_pid {0};
+    unsigned short m_helper_port {0};
+    unsigned short m_helper_rtsp_port {0};
+    boost::filesystem::path m_helper_config;
+    bool m_camera_handler_registered {false};
+};
+#endif
 
 class ElegooPrinterWebViewHandler final : public PrinterWebViewHandler {
 public:
@@ -312,6 +596,10 @@ std::unique_ptr<PrinterWebViewHandler> create_printer_webview_handler(PrinterWeb
     const auto host_type = cfg->option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
     switch (host_type)
     {
+#ifdef __linux__
+        case PrintHostType::htCrealityPrint:
+            return std::make_unique<CrealityPrinterWebViewHandler>(owner);
+#endif
         case PrintHostType::htElegooLink:
             return std::make_unique<ElegooPrinterWebViewHandler>(owner);
         default:

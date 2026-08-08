@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mcp_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+server="${mcp_root}/dist/server.js"
+
+if [[ ! -d "${mcp_root}/node_modules" ]]; then
+    echo "OrcaSlicer MCP dependencies are missing; run: npm ci --prefix tools/orca-mcp" >&2
+    exit 2
+fi
+
+if [[ ! -f "${server}" ]] || find "${mcp_root}/src" -type f -newer "${server}" -print -quit | grep -q .; then
+    npm run --silent --prefix "${mcp_root}" build
+fi
+
+exec node "${server}"

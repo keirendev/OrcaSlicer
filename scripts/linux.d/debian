@@ -3,6 +3,7 @@
 REQUIRED_DEV_PACKAGES=(
     autoconf
     build-essential
+    ccache
     cmake
     eglexternalplatform-dev
     extra-cmake-modules
@@ -56,8 +57,10 @@ then
     fi
 
     # install them all at once
-    sudo apt update
-    sudo apt install -y "${REQUIRED_DEV_PACKAGES[@]}"
+    # sudo may discard the Dockerfile's DEBIAN_FRONTEND value. Set both values
+    # on the privileged command so container builds can never stop for tzdata.
+    sudo DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt update
+    sudo DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt install -y "${REQUIRED_DEV_PACKAGES[@]}"
 
     echo -e "done\n"
     exit 0
