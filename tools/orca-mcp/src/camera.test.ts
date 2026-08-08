@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { repoRoot } from "./operations.js";
 
 const script = await readFile(join(repoRoot, "resources", "web", "k1_camera_webrtc.js"), "utf8");
+const handlerSource = await readFile(join(repoRoot, "src", "slic3r", "GUI", "PrinterWebViewHandler.cpp"), "utf8");
+const nativePreviewUrl = "http://127.0.0.1:19840/stream.html?src=k1_source&mode=mse&background=true";
 
 function page(legacyWorks: boolean) {
   const dom = new JSDOM("<div class='comp-CameraShow'><div class='content'><img class='camera-image'></div></div>", {
@@ -33,7 +35,7 @@ function installBridge(dom: JSDOM, messages: BridgeRequest[], respond: (request:
   }});
 }
 
-function ready(dom: JSDOM, id: string, url = "http://127.0.0.1:19840/camera.html") {
+function ready(dom: JSDOM, id: string, url = nativePreviewUrl) {
   dom.window.dispatchEvent(new dom.window.CustomEvent("orca:creality-camera-ready", {
     detail: { id, ok: true, url }
   }));
@@ -73,7 +75,7 @@ test("camera bridge replaces a failed legacy camera with a loopback preview", as
   assert.equal(messages.length, 1, "repeated Device load must not create a second bridge");
   const frame = dom.window.document.querySelector("iframe[data-orca-webrtc-video]") as HTMLIFrameElement;
   assert.ok(frame);
-  assert.equal(frame.src, "http://127.0.0.1:19840/camera.html");
+  assert.equal(frame.src, nativePreviewUrl);
   assert.equal(frame.getAttribute("sandbox"), "allow-scripts allow-same-origin");
   cameraMessage(dom, "playing");
   assert.equal(dom.window.document.querySelector("[data-orca-webrtc-status]"), null);
@@ -87,13 +89,13 @@ test("camera bridge accepts a C++-injected loopback endpoint without browser IPC
   const messages: BridgeRequest[] = [];
   installBridge(dom, messages, () => {});
   Object.defineProperty(dom.window, "__orcaCrealityCameraBridge", {
-    value: { ok: true, url: "http://127.0.0.1:19840/camera.html" }
+    value: { ok: true, url: nativePreviewUrl }
   });
   dom.window.eval(script);
   await new Promise(resolve => setTimeout(resolve, 40));
   assert.equal(messages.length, 0);
   assert.equal((dom.window.document.querySelector("iframe[data-orca-webrtc-video]") as HTMLIFrameElement).src,
-    "http://127.0.0.1:19840/camera.html");
+    nativePreviewUrl);
   (dom.window as unknown as { __orcaCrealityCamera: { stop(): void } }).__orcaCrealityCamera.stop();
   dom.window.close();
 });
@@ -108,7 +110,7 @@ test("camera bridge ignores stale responses and correlates the active request", 
   dom.window.eval(script);
   await new Promise(resolve => setTimeout(resolve, 40));
   const frame = dom.window.document.querySelector("iframe[data-orca-webrtc-video]") as HTMLIFrameElement;
-  assert.equal(frame.src, "http://127.0.0.1:19840/camera.html");
+  assert.equal(frame.src, nativePreviewUrl);
   (dom.window as unknown as { __orcaCrealityCamera: { stop(): void } }).__orcaCrealityCamera.stop();
   dom.window.close();
 });
@@ -168,4 +170,12 @@ test("camera bridge tolerates a missing camera DOM", async () => {
   missing.window.dispatchEvent(new missing.window.Event("pagehide"));
   assert.doesNotThrow(() => (missing.window as unknown as { __orcaCrealityCamera: { considerCamera(): void } }).__orcaCrealityCamera.considerCamera());
   missing.window.close();
+});
+
+test("camera helper passes native H.264 through MSE without MJPEG polling or transcoding", () => {
+  assert.match(handlerSource, /modules: \[api, ws, rtsp, webrtc, mp4\]/);
+  assert.match(handlerSource, /allow_paths: \[\\\"\/\\\", \\\"\/api\/ws\\\"\]/);
+  assert.match(handlerSource, /k1_source: \\\"video=h264\\\"/);
+  assert.match(handlerSource, /stream\.html\?src=k1_source&mode=mse&background=true/);
+  assert.doesNotMatch(handlerSource, /ffmpeg:k1_source|frame\.jpeg|raw=-r|k1_orca/);
 });
