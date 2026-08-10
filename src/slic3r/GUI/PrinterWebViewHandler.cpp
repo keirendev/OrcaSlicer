@@ -15,16 +15,25 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <chrono>
+#include <cerrno>
 #include <mutex>
 #include <sstream>
+#include <system_error>
+#include <thread>
+#include <vector>
 #include <wx/filedlg.h>
 #include <wx/filename.h>
-#include <wx/process.h>
 #include <wx/string.h>
 #include <wx/utils.h>
 #include <wx/weakref.h>
 
 #ifdef __linux__
+#include <boost/process.hpp>
+#include <boost/process/extend.hpp>
+#include <csignal>
+#include <sys/prctl.h>
+#include <unistd.h>
 #include <webkit2/webkit2.h>
 #endif
 
@@ -115,19 +124,6 @@ std::string yaml_quote(const std::string& value)
         result.push_back(c);
     }
     result.push_back('"');
-    return result;
-}
-
-std::string shell_quote(const std::string& value)
-{
-    std::string result = "'";
-    for (char c : value) {
-        if (c == '\'')
-            result += "'\\''";
-        else
-            result.push_back(c);
-    }
-    result.push_back('\'');
     return result;
 }
 
@@ -248,9 +244,14 @@ private:
     std::string ensure_helper(std::string& error)
     {
         std::lock_guard<std::mutex> lock(m_helper_mutex);
-        if (m_helper_pid > 0 && wxProcess::Exists(m_helper_pid)) {
-            error.clear();
-            return camera_url();
+        if (m_helper_process) {
+            std::error_code process_error;
+            if (m_helper_process->running(process_error)) {
+                error.clear();
+                return camera_url();
+            }
+            if (process_error)
+                BOOST_LOG_TRIVIAL(warning) << "Unable to query the K1 camera helper: " << process_error.message();
         }
         stop_helper_locked();
 
@@ -320,15 +321,28 @@ private:
             return {};
         }
 
-        const std::string command = shell_quote(helper_path.string()) + " -config " + shell_quote(m_helper_config.string());
-        m_helper_pid = wxExecute(wxString::FromUTF8(command), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE);
-        if (m_helper_pid <= 0) {
-            error = "Unable to launch the packaged K1 camera helper";
+        const pid_t parent_pid = ::getpid();
+        try {
+            m_helper_process = std::make_unique<boost::process::child>(
+                helper_path.string(),
+                boost::process::args(std::vector<std::string>{"-config", m_helper_config.string()}),
+                boost::process::extend::on_exec_setup([parent_pid](auto& executor) {
+                    if (::prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
+                        executor.set_error(std::error_code(errno, std::generic_category()),
+                                           "Unable to arm the K1 camera helper parent-death signal");
+                        return;
+                    }
+                    if (::getppid() != parent_pid)
+                        executor.set_error(std::make_error_code(std::errc::no_such_process),
+                                           "OrcaSlicer exited while launching the K1 camera helper");
+                }));
+        } catch (const std::exception& exception) {
+            error = std::string("Unable to launch the packaged K1 camera helper: ") + exception.what();
             stop_helper_locked();
             return {};
         }
 
-        BOOST_LOG_TRIVIAL(info) << "Creality camera helper started pid=" << m_helper_pid
+        BOOST_LOG_TRIVIAL(info) << "Creality camera helper started pid=" << m_helper_process->id()
                                 << " loopback_port=" << m_helper_port;
         error.clear();
         return camera_url();
@@ -348,16 +362,61 @@ private:
 
     void stop_helper_locked()
     {
-        if (m_helper_pid > 0 && wxProcess::Exists(m_helper_pid)) {
-            wxKillError kill_error = wxKILL_OK;
-            wxKill(m_helper_pid, wxSIGTERM, &kill_error, wxKILL_CHILDREN);
+        bool helper_stopped = true;
+        if (m_helper_process) {
+            std::error_code process_error;
+            bool running = m_helper_process->running(process_error);
+            if (process_error)
+                BOOST_LOG_TRIVIAL(warning) << "Unable to query the K1 camera helper during shutdown: "
+                                           << process_error.message();
+
+            if (running) {
+                const auto pid = m_helper_process->id();
+                if (::kill(pid, SIGTERM) != 0 && errno != ESRCH)
+                    BOOST_LOG_TRIVIAL(warning) << "Unable to stop the K1 camera helper pid=" << pid
+                                               << ": " << std::error_code(errno, std::generic_category()).message();
+
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                do {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    process_error.clear();
+                    running = m_helper_process->running(process_error);
+                } while (running && !process_error && std::chrono::steady_clock::now() < deadline);
+
+                if (running) {
+                    BOOST_LOG_TRIVIAL(warning) << "K1 camera helper pid=" << pid
+                                               << " ignored SIGTERM; forcing termination";
+                    process_error.clear();
+                    m_helper_process->terminate(process_error);
+                    if (process_error) {
+                        BOOST_LOG_TRIVIAL(error) << "Unable to force-stop the K1 camera helper pid=" << pid
+                                                 << ": " << process_error.message();
+                    } else {
+                        const auto force_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+                        do {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                            running = m_helper_process->running(process_error);
+                        } while (running && !process_error && std::chrono::steady_clock::now() < force_deadline);
+                    }
+                }
+
+                if (running || process_error) {
+                    helper_stopped = false;
+                    m_helper_process->detach();
+                }
+            }
+            m_helper_process.reset();
         }
-        m_helper_pid = 0;
         m_helper_port = 0;
         m_helper_rtsp_port = 0;
         if (!m_helper_config.empty()) {
-            boost::system::error_code ec;
-            boost::filesystem::remove(m_helper_config, ec);
+            if (helper_stopped) {
+                boost::system::error_code ec;
+                boost::filesystem::remove(m_helper_config, ec);
+            } else {
+                BOOST_LOG_TRIVIAL(error) << "Preserving the K1 camera helper configuration after a failed stop: "
+                                         << m_helper_config.string();
+            }
             m_helper_config.clear();
         }
     }
@@ -380,7 +439,7 @@ private:
 
     wxWeakRef<wxWebView> m_browser;
     std::mutex m_helper_mutex;
-    long m_helper_pid {0};
+    std::unique_ptr<boost::process::child> m_helper_process;
     unsigned short m_helper_port {0};
     unsigned short m_helper_rtsp_port {0};
     boost::filesystem::path m_helper_config;
