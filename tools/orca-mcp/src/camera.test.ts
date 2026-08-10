@@ -185,6 +185,15 @@ test("camera helper passes native H.264 to the dedicated low-latency player with
   assert.doesNotMatch(handlerSource, /ffmpeg:k1_source|frame\.jpeg|raw=-r|k1_orca/);
 });
 
+test("camera helper is reaped on navigation and terminated if OrcaSlicer exits", () => {
+  assert.match(handlerSource, /PR_SET_PDEATHSIG, SIGTERM/);
+  assert.match(handlerSource, /getppid\(\) != parent_pid/);
+  assert.match(handlerSource, /::kill\(pid, SIGTERM\)/);
+  assert.match(handlerSource, /m_helper_process->terminate\(process_error\)/);
+  assert.match(handlerSource, /m_helper_process->running\(process_error\)/);
+  assert.doesNotMatch(handlerSource, /wxKILL_CHILDREN|wxExecute\(/);
+});
+
 test("dedicated player is video-only and holds a bounded live-edge latency at normal speed", () => {
   const player = new JSDOM(playerHtml).window.document.querySelector("video") as HTMLVideoElement;
   assert.ok(player);
